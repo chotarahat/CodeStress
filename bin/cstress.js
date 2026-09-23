@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import dotenv from 'dotenv';
 import { printBanner } from '../src/cli/banner.js';
 import { Stage0Confirm } from '../src/pipeline/stage0Confirm.js';
+import { Stage1Understand } from '../src/pipeline/stage1Understand.js';
 
 dotenv.config();
 
@@ -15,6 +16,8 @@ program
   .description('AI-powered adversarial testing CLI tool — Stress test your logic, not just your server.')
   .version('1.0.0')
   .argument('[target]', 'Target application URL (e.g. http://localhost:3000 or https://myapp.com)')
+  .option('--understand', 'Read repository source and produce an AI understanding report')
+  .option('--read-source', 'Read repository inventory without AI or target requests')
   .option('-g, --gui', 'Launch interactive Web GUI dashboard on port 9999')
   .option('-p, --port <port>', 'Port for web GUI server', '9999')
   .option('-r, --repo <path_or_url>', 'Codebase path (local directory) or GitHub repo URL', process.cwd())
@@ -28,6 +31,12 @@ program
   .option('-y, --yes', 'Automatically answer yes to confirmation prompts', false)
   .action(async (target, options) => {
     try {
+      if (options.understand || options.readSource) {
+        const result = await new Stage1Understand({ repo: options.repo, token: options.token, readOnly: Boolean(options.readSource) }).execute();
+        console.log(JSON.stringify(result, null, 2));
+        if (result.error || !result.coverage.complete || !result.coverage.filesRead) process.exitCode = 1;
+        return;
+      }
       // If GUI flag is passed or no target provided, start web dashboard
       if (options.gui || !target) {
         const { startGuiServer } = await import('../src/gui/server.js');

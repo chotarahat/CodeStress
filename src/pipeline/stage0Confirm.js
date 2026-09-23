@@ -14,8 +14,6 @@ export class Stage0Confirm {
     this.email = options.email;
     this.password = options.password;
     this.authId = options.authId;
-    this.pin = options.pin;
-    this.pinLoginPath = options.pinLoginPath || "/api/auth/login";
     this.autoYes = Boolean(options.yes);
     this.aiClient = new AIClient();
   }
@@ -46,52 +44,7 @@ export class Stage0Confirm {
   /**
    * Test authentication credentials or tokens
    */
-  async loginWithPin() {
-    const failed = error => ({ valid: false, authenticated: false, status: 'FAILED', type: 'PIN', error });
-    if (typeof this.pin !== 'string' || !/^\d+$/.test(this.pin)) {
-      return failed('Enter a numeric PIN.');
-    }
-    let loginUrl;
-    try {
-      const target = new URL(this.target);
-      if (typeof this.pinLoginPath !== 'string' || !this.pinLoginPath.startsWith('/')) {
-        return failed('Login endpoint must be a path beginning with /.');
-      }
-      loginUrl = new URL(this.pinLoginPath, target);
-      if (loginUrl.origin !== target.origin || !['http:', 'https:'].includes(loginUrl.protocol)) {
-        return failed('PIN login endpoint must belong to the target website.');
-      }
-    } catch {
-      return failed('Invalid target URL or PIN login endpoint.');
-    }
-    try {
-      const response = await axios.post(loginUrl.href, { pin: this.pin }, {
-        timeout: 8000,
-        maxRedirects: 0,
-        validateStatus: () => true
-      });
-      const data = response.data;
-      const cookies = response.headers['set-cookie'];
-      const token = data?.token || data?.accessToken;
-      const rejected = data?.success === false || data?.authenticated === false || data?.valid === false || Boolean(data?.error);
-      const granted = token || cookies?.length || data?.success === true || data?.authenticated === true || data?.valid === true;
-      if (response.status < 200 || response.status >= 300 || rejected || !granted) {
-        return failed(`PIN login was not confirmed (HTTP ${response.status}). Check the PIN and login endpoint.`);
-      }
-      if (cookies?.length) this.cookie = cookies.map(cookie => cookie.split(';')[0]).join('; ');
-      if (token) this.bearer = token;
-      console.log(chalk.green('PIN login authenticated ✓'));
-      return { valid: true, authenticated: true, status: 'SUCCESS', type: 'PIN' };
-    } catch {
-      // Never include the request body or credential in logs or streamed errors.
-      return failed('Could not reach the PIN login endpoint. Check the target and try again.');
-    }
-  }
-
   async testAuth() {
-    if (!this.bearer && !this.cookie && this.pin !== undefined) {
-      return this.loginWithPin();
-    }
     process.stdout.write(chalk.gray('  → Testing authentication... '));
 
     const headers = {};

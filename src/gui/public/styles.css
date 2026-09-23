@@ -1074,7 +1074,7 @@ input:focus,select:focus {
     font-size:12px;
     letter-spacing:0;
   }
-  .stat-label span {
+  .stat-label span:last-child {
     display:none;
   }
   .stat strong {
@@ -1109,3 +1109,17 @@ input:focus,select:focus {
   }
 }
 
+
+.secondary-button {
+  width:100%; padding:12px 14px; margin-top:16px; border:1px solid #3b5043;
+  border-radius:5px; background:#17231c; color:#d4eddf; font-size:16px;
+}
+.results-toolbar [role=tablist] { flex-wrap:wrap; }
+.results-toolbar { flex-wrap:wrap; }
+#fileInventory { margin:18px 0; }
+.file-entry { padding:12px 0; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+.file-entry summary { cursor:pointer; font-size:14px; }
+.file-entry p { color:var(--muted); font-size:13px; }
+#coverageText { font-size:14px; color:#b9c8bf; overflow-wrap:anywhere; }
+
+#statusLabel, #authLabel { font:inherit; display:inline; }
