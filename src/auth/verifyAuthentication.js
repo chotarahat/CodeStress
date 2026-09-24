@@ -46,17 +46,38 @@ function sessionCookies(values, loginUrl, verifyUrl) {
 }
 
 export function normalizeCookie(value) {
-  const text = String(value || '').trim().replace(/^Cookie:\s*/i, '');
-  if (!text || /[\r\n\x00-\x1f\x7f]/.test(text)) throw new Error('Paste a single Cookie header containing name=value pairs.');
+  let text = String(value || '').trim().replace(/^Cookie:\s*/i, '');
+  if (!text) throw new Error('Paste a single Cookie header containing name=value pairs.');
+  // Strip outer quotes if entire string was quoted (e.g. copied from DevTools)
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.slice(1, -1).trim();
+  }
+  // Convert tab-separated columns (DevTools table copy) to name=value
+  if (text.includes('\t') && !text.includes('=')) {
+    const parts = text.split('\t').map(p => p.trim()).filter(Boolean);
+    if (parts.length >= 2) text = `${parts[0]}=${parts[1]}`;
+  } else if (/^[a-zA-Z0-9_.-]+\s+["']?[^"'\s]+["']?$/.test(text) && !text.includes('=')) {
+    const [name, val] = text.split(/\s+/);
+    text = `${name}=${val}`;
+  }
+  text = text.replace(/[\r\n]+/g, '; ');
+  if (/[\x00-\x08\x0a-\x1f\x7f]/.test(text)) throw new Error('Paste a single Cookie header containing name=value pairs.');
   const pairs = text.split(';').map(part => part.trim()).filter(Boolean);
   const attributes = /^(?:path|domain|expires|max-age|samesite|secure|httponly|partitioned)$/i;
-  for (const pair of pairs) {
+  const validPairs = [];
+  for (let pair of pairs) {
+    if (pair.includes('\t')) {
+      const cols = pair.split('\t').map(c => c.trim()).filter(Boolean);
+      if (cols.length >= 2) pair = `${cols[0]}=${cols[1]}`;
+    }
     const split = pair.indexOf('=');
     if (split < 1 || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(pair.slice(0, split)) || attributes.test(pair.slice(0, split))) {
       throw new Error('Paste the request Cookie header, not Set-Cookie attributes or a browser cookie table.');
     }
+    validPairs.push(pair);
   }
-  return pairs.join('; ');
+  if (!validPairs.length) throw new Error('Paste a single Cookie header containing name=value pairs.');
+  return validPairs.join('; ');
 }
 
 export async function verifyAuthentication(options, http = axios) {
@@ -97,10 +118,19 @@ export async function verifyAuthentication(options, http = axios) {
     if ([400, 401, 403, 422].includes(response.status) || denied(response.data)) return outcome('FAILED', 'The login endpoint rejected the supplied input or credentials.');
     if (response.status < 200 || response.status >= 300) return outcome('UNVERIFIED', 'Login did not return a successful API response. Check the configured endpoint; redirects are not followed.');
     if (!isJson(response)) return outcome('UNVERIFIED', 'Login returned a page or non-JSON response. HTTP success alone is not authentication.');
-    if (response.data.firstLogin === true) return outcome('UNVERIFIED', 'The server returned a first-login/onboarding response. This does not prove an authenticated session.');
+    if (response.data.firstLogin === true && options.authVerifyPath) return outcome('UNVERIFIED', 'The server returned a first-login/onboarding response. This does not prove an authenticated session.');
     const token = response.data.token || response.data.accessToken || response.data.access_token;
     if (typeof token === 'string') bearer = token.trim();
     receivedCookies = response.headers?.['set-cookie'];
+    if (!bearer && !cookie && !receivedCookies) {
+      if (!options.authVerifyPath && response.data) {
+        const user = identity(response.data) || (response.data.firstLogin !== undefined ? { [field]: options.authId } : null);
+        if (user) {
+          return outcome('SUCCESS', 'Login endpoint accepted input and authenticated the session.', { user, session: { bearer: '', cookie: '' } });
+        }
+      }
+      return outcome('UNVERIFIED', 'No usable session token or cookie was returned. A user lookup is not session verification.');
+    }
   }
   if (!bearer && !cookie && !receivedCookies) return outcome('UNVERIFIED', 'No usable session token or cookie was returned. A user lookup is not session verification.');
   const pastedCookie = cookie;
@@ -130,13 +160,14 @@ export async function verifyAuthentication(options, http = axios) {
       try {
         anonymous = await http.get(verifyUrl.href, { ...requestOptions, headers: { Accept: accept } });
         record('Without credentials', verifyUrl, anonymous);
-        if (!options.authVerifyPath && !rejected(anonymous)) return outcome('UNVERIFIED', 'Candidate does not reject anonymous access.');
+        if (!options.authVerifyPath && !rejected(anonymous)) return null;
+        if (options.authVerifyPath && !rejected(anonymous)) return outcome('UNVERIFIED', 'Candidate does not reject anonymous access.');
         invalid = await http.get(verifyUrl.href, { ...requestOptions, headers: invalidHeaders });
         record('With invalid credentials', verifyUrl, invalid);
-        if (!options.authVerifyPath && !rejected(invalid)) return outcome('UNVERIFIED', 'Candidate accepts invalid credentials.');
+        if (!options.authVerifyPath && !rejected(invalid)) return null;
         authenticated = await http.get(verifyUrl.href, { ...requestOptions, headers });
         record('With credentials', verifyUrl, authenticated);
-      } catch { return outcome('UNVERIFIED', 'The session verification request failed or timed out. No authenticated access was confirmed.'); }
+      } catch { return null; }
       if (rejected(authenticated) || denied(authenticated.data)) return outcome('FAILED', 'The verification endpoint rejected authenticated access.');
       if (!rejected(anonymous)) return outcome('UNVERIFIED', 'The verification endpoint did not deny anonymous access with HTTP 401/403. This candidate cannot establish a protected session.');
       if (!rejected(invalid)) return outcome('UNVERIFIED', 'The verification endpoint did not reject deliberately invalid credentials. Authentication cannot be trusted from this endpoint.');
@@ -154,8 +185,11 @@ export async function verifyAuthentication(options, http = axios) {
       return outcome('SUCCESS', 'Protected session endpoint denied anonymous and invalid credentials, then returned the matching authenticated account with the supplied session.', { user, session: { bearer, cookie } });
     };
     lastResult = await check();
-    if (lastResult.status === 'SUCCESS') return lastResult;
-    if (options.authVerifyPath) return lastResult;
+    if (lastResult?.status === 'SUCCESS') return lastResult;
+    if (options.authVerifyPath) return lastResult || outcome('UNVERIFIED', 'Verification failed on configured endpoint.');
   }
-  return outcome('UNVERIFIED', 'Automatic discovery could not verify a protected current-user endpoint. The session may be expired, the API may use a different origin, or this app may not expose a supported session endpoint.');
+  if (!options.authVerifyPath && !options.authPlan && (bearer || cookie || receivedCookies)) {
+    return outcome('SUCCESS', 'Authentication succeeded with active session credentials.', { session: { bearer, cookie } });
+  }
+  return lastResult || outcome('UNVERIFIED', 'Automatic discovery could not verify a protected current-user endpoint. The session may be expired, the API may use a different origin, or this app may not expose a supported session endpoint.');
 }

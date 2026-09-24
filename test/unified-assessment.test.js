@@ -80,7 +80,7 @@ test('memory invalidates source changes and redacts values without corrupting JS
   assert.deepEqual(JSON.parse(JSON.stringify(redacted)).nested, ['cookie=[redacted]', '[redacted]']);
 });
 
-test('unified assessment saves understanding before authenticating and reuses matching notes', async () => {
+test('unified assessment authenticates before full understanding and reuses matching notes', async () => {
   const calls = [], phases = [], writes = [];
   let sourceRequests = 0;
   const ai = { model: 'fixture', analyzeSource: async instruction => {
@@ -91,16 +91,18 @@ test('unified assessment saves understanding before authenticating and reuses ma
   const memory = { state: { notes: [] }, async load() { return this.state; }, async save(update) { this.state = { ...this.state, ...update }; writes.push(update); } };
   const options = { target: 'https://example.test', repo: '.', repository, memory, ai, cookie: 'app_session=valid', http: fakeHttp(calls), onEvent: event => {
     if (event.type === 'assessment_phase') phases.push(event.phase);
-    if (event.type === 'authentication_result') assert.ok(writes.some(write => write.report?.aiUnderstanding));
+    if (event.type === 'authentication_result') assert.ok(writes.some(write => write.authentication?.status === 'SUCCESS'));
   } };
   const result = await new Assessment(options).execute();
   assert.equal(result.authentication.status, 'SUCCESS');
-  assert.deepEqual(phases, ['reachability', 'reading', 'understanding', 'planning', 'authentication']);
+  assert.deepEqual(phases, ['reachability', 'reading', 'planning', 'authentication', 'waiting', 'understanding']);
   assert.equal(sourceRequests, 1);
+  assert.ok(writes.some(write => write.report?.aiUnderstanding));
   assert.ok(!JSON.stringify(writes).includes('app_session=valid'));
   await new Assessment(options).execute();
   assert.equal(sourceRequests, 1, 'unchanged source notes should be reused');
 });
+
 
 test('unreachable target does not overwrite existing project memory or call AI', async () => {
   let wrote = false;

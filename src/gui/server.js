@@ -31,8 +31,12 @@ function broadcastLog(data) {
     if (data.type === 'memory_status') currentRun.memory = data;
     if (data.type === 'assessment_phase') currentRun.phase = data;
     if (data.type === 'target_reachable') currentRun.target = data;
+    if (data.type === 'user_prompt') currentRun.userPrompt = data;
     if (['reading_progress', 'understanding_progress'].includes(data.type)) currentRun.progress = data;
-    if (['stage_complete', 'stage_error', 'assessment_complete'].includes(data.type)) currentRun.finished = data;
+    if (['stage_complete', 'stage_error', 'assessment_complete'].includes(data.type)) {
+      currentRun.finished = data;
+      currentRun.userPrompt = null;
+    }
   }
   const payload = `data: ${JSON.stringify(data)}\n\n`;
   activeClients.forEach(client => {
@@ -59,7 +63,7 @@ app.get('/api/stream', (req, res) => {
   res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
 
   if (currentRun?.active) {
-    for (const event of [currentRun.started, currentRun.target, currentRun.repository, currentRun.auth, currentRun.memory, currentRun.phase]) {
+    for (const event of [currentRun.started, currentRun.target, currentRun.repository, currentRun.auth, currentRun.memory, currentRun.phase, currentRun.userPrompt]) {
       if (event) res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
   } else if (currentRun?.finished) {
@@ -83,12 +87,13 @@ app.get('/api/status', (req, res) => {
     engine: `Ollama (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'})`,
     model: process.env.OLLAMA_MODEL || 'gpt-oss:120b',
     running: Boolean(currentRun?.active),
+    waitingForUser: Boolean(currentRun?.continueResolver),
     hasOllamaKey: Boolean(process.env.OLLAMA_API || process.env.OLLAMA_API_KEY),
     port: PORT
   });
 });
 
-// One workflow: reachable -> source -> understanding -> authentication.
+// One workflow: reachable -> read auth source -> authenticate -> ask user -> full understanding.
 app.post('/api/run', async (req, res) => {
   if (currentRun?.active) return res.status(409).json({ error: 'An assessment is already running.' });
   const { target, repo, authId, bearer, cookie, email, password } = req.body || {};
@@ -98,17 +103,46 @@ app.post('/api/run', async (req, res) => {
     parseRepository(repo);
     for (const value of [authId, bearer, cookie, email, password]) if (value !== undefined && typeof value !== 'string') throw new Error();
   } catch { return res.status(400).json({ error: 'Enter a valid HTTP(S) target, repository and text credentials.' }); }
-  currentRun = { runId: Date.now(), active: true };
+  currentRun = { runId: Date.now(), active: true, continueResolver: null, userPrompt: null };
   res.json({ success: true, message: 'Assessment initiated' });
   broadcastLog({ type: 'stage_start', name: 'Assessment' });
   try {
-    const result = await new Assessment({ target, repo, authId, bearer, cookie, email, password, onEvent: broadcastLog }).execute();
+    const result = await new Assessment({
+      target, repo, authId, bearer, cookie, email, password,
+      onEvent: broadcastLog,
+      onUserPrompt: async (data) => {
+        broadcastLog(data);
+        return new Promise(resolve => {
+          if (currentRun) currentRun.continueResolver = resolve;
+          else resolve(false);
+        });
+      }
+    }).execute();
     broadcastLog({ type: 'assessment_complete', data: result });
   } catch (error) {
     // Do not expose transport errors, request credentials or raw model responses.
     const known = /^(The target could not be reached\.|AI understanding is unavailable\.|AI authentication (plan|planning)|Local repository folder|The local repository path|GitHub (repository|access)|Repository not found\.|Project memory could not be read\.)/.test(error.message || '');
     broadcastLog({ type: 'stage_error', error: known ? error.message : 'Assessment could not finish. Completed findings remain in project memory. Check the current phase, repository access and Ollama configuration.' });
-  } finally { currentRun.active = false; }
+  } finally {
+    if (currentRun) {
+      currentRun.active = false;
+      currentRun.continueResolver = null;
+      currentRun.userPrompt = null;
+    }
+  }
+});
+
+// User response to "Read full codebase?" prompt
+app.post('/api/continue', (req, res) => {
+  if (!currentRun?.continueResolver) {
+    return res.status(409).json({ error: 'No assessment is waiting for user confirmation.' });
+  }
+  const proceed = req.body?.proceed !== false;
+  const resolver = currentRun.continueResolver;
+  currentRun.continueResolver = null;
+  currentRun.userPrompt = null;
+  resolver(proceed);
+  res.json({ success: true, proceed });
 });
 
 app.get('/api/memory', async (req, res) => {
@@ -129,7 +163,7 @@ app.post('/api/understand', async (req, res) => {
   try { parseRepository(repo); }
   catch (error) { return res.status(400).json({ error: error.message }); }
   if (typeof readOnly !== 'boolean') return res.status(400).json({ error: 'readOnly must be a boolean.' });
-  currentRun = { runId: Date.now(), active: true };
+  currentRun = { runId: Date.now(), active: true, continueResolver: null, userPrompt: null };
   res.json({ success: true, message: 'Source reading initiated' });
   broadcastLog({ type: 'stage_start', stage: 1, name: readOnly ? 'Read source' : 'Understand codebase' });
   try {
@@ -139,7 +173,13 @@ app.post('/api/understand', async (req, res) => {
     broadcastLog({ type: 'stage_complete', stage: 1, data: result });
   } catch (error) {
     broadcastLog({ type: 'stage_error', stage: 1, error: error.message });
-  } finally { currentRun.active = false; }
+  } finally {
+    if (currentRun) {
+      currentRun.active = false;
+      currentRun.continueResolver = null;
+      currentRun.userPrompt = null;
+    }
+  }
 });
 
 // API errors must remain JSON, including Express body-parser errors and 404s.
