@@ -3,7 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 import dotenv from 'dotenv';
-import { Stage0Confirm } from '../pipeline/stage0Confirm.js';
+import { Assessment } from '../pipeline/assessment.js';
+import { ProjectMemory, projectKey } from '../memory/projectMemory.js';
 import { Stage1Understand } from '../pipeline/stage1Understand.js';
 import { parseRepository } from '../repo/repositoryReader.js';
 
@@ -26,9 +27,12 @@ function broadcastLog(data) {
   if (currentRun) {
     if (data.type === 'stage_start') currentRun.started = data;
     if (data.type === 'authentication_result') currentRun.auth = data;
-    if (data.type === 'repository_read') currentRun.repository = data;
+    if (['repository_read', 'understanding_ready'].includes(data.type)) currentRun.repository = data;
+    if (data.type === 'memory_status') currentRun.memory = data;
+    if (data.type === 'assessment_phase') currentRun.phase = data;
+    if (data.type === 'target_reachable') currentRun.target = data;
     if (['reading_progress', 'understanding_progress'].includes(data.type)) currentRun.progress = data;
-    if (['stage_complete', 'stage_error'].includes(data.type)) currentRun.finished = data;
+    if (['stage_complete', 'stage_error', 'assessment_complete'].includes(data.type)) currentRun.finished = data;
   }
   const payload = `data: ${JSON.stringify(data)}\n\n`;
   activeClients.forEach(client => {
@@ -55,10 +59,13 @@ app.get('/api/stream', (req, res) => {
   res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
 
   if (currentRun?.active) {
-    for (const event of [currentRun.started, currentRun.auth, currentRun.repository, currentRun.progress]) {
+    for (const event of [currentRun.started, currentRun.target, currentRun.repository, currentRun.auth, currentRun.memory, currentRun.phase]) {
       if (event) res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
   } else if (currentRun?.finished) {
+    for (const event of [currentRun.target, currentRun.repository, currentRun.memory]) {
+      if (event) res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
     if (currentRun.auth) res.write(`data: ${JSON.stringify(currentRun.auth)}\n\n`);
     res.write(`data: ${JSON.stringify(currentRun.finished)}\n\n`);
   }
@@ -72,7 +79,7 @@ app.get('/api/stream', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
-    capabilities: ['source-understanding', 'evidence-based-auth', 'automatic-auth-discovery'],
+    capabilities: ['source-understanding', 'evidence-based-auth', 'automatic-auth-discovery', 'unified-assessment'],
     engine: `Ollama (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'})`,
     model: process.env.OLLAMA_MODEL || 'gpt-oss:120b',
     running: Boolean(currentRun?.active),
@@ -81,93 +88,38 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Run Stage 0 / Pipeline from GUI
+// One workflow: reachable -> source -> understanding -> authentication.
 app.post('/api/run', async (req, res) => {
-  const { target, repo, authId, bearer, cookie, email, password, authLoginPath, authVerifyPath, authIdField } = req.body || {};
-
   if (currentRun?.active) return res.status(409).json({ error: 'An assessment is already running.' });
-  if (!target) {
-    return res.status(400).json({ error: 'Target URL is required' });
-  }
-
-  res.json({ success: true, message: 'Execution initiated' });
-
-  // Start background run and stream logs
-  const runId = Date.now();
-  currentRun = { runId, aborted: false, active: true };
-
-  broadcastLog({
-    type: 'log',
-    level: 'info',
-    text: `🚀 Starting CodeStress run against ${target}`
-  });
-
+  const { target, repo, authId, bearer, cookie, email, password } = req.body || {};
   try {
-    broadcastLog({
-      type: 'stage_start',
-      stage: 0,
-      name: 'Confirm Target'
-    });
+    const url = new URL(target);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
+    parseRepository(repo);
+    for (const value of [authId, bearer, cookie, email, password]) if (value !== undefined && typeof value !== 'string') throw new Error();
+  } catch { return res.status(400).json({ error: 'Enter a valid HTTP(S) target, repository and text credentials.' }); }
+  currentRun = { runId: Date.now(), active: true };
+  res.json({ success: true, message: 'Assessment initiated' });
+  broadcastLog({ type: 'stage_start', name: 'Assessment' });
+  try {
+    const result = await new Assessment({ target, repo, authId, bearer, cookie, email, password, onEvent: broadcastLog }).execute();
+    broadcastLog({ type: 'assessment_complete', data: result });
+  } catch (error) {
+    // Do not expose transport errors, request credentials or raw model responses.
+    const known = /^(The target could not be reached\.|AI understanding is unavailable\.|AI authentication (plan|planning)|Local repository folder|The local repository path|GitHub (repository|access)|Repository not found\.|Project memory could not be read\.)/.test(error.message || '');
+    broadcastLog({ type: 'stage_error', error: known ? error.message : 'Assessment could not finish. Completed findings remain in project memory. Check the current phase, repository access and Ollama configuration.' });
+  } finally { currentRun.active = false; }
+});
 
-    const stage0 = new Stage0Confirm({
-      target,
-      repo: repo || process.cwd(),
-      authId,
-      authLoginPath,
-      authVerifyPath,
-      authIdField,
-      onAuthResult: result => broadcastLog({ type: 'authentication_result', data: result }),
-      bearer,
-      cookie,
-      email,
-      password,
-      yes: true // auto-confirm in GUI
-    });
-
-    const result = await stage0.execute();
-
-    broadcastLog({
-      type: 'stage_complete',
-      stage: 0,
-      data: {
-        reachable: true,
-        authStatus: result.authResult?.status || 'UNVERIFIED',
-        authVerified: result.authResult?.authenticated === true,
-        authDetail: result.authResult?.detail || '',
-        authEvidence: result.authResult?.evidence || [],
-        confirmed: result.confirmed,
-        sourceScanned: Boolean(result.codeAnalysis),
-        authMode: result.authResult?.type || 'unauthenticated',
-        authUser: result.authResult?.user || null,
-        authError: result.authResult?.error || null,
-        endpointsCount: result.codeAnalysis?.endpoints || 0,
-        routeGroupsCount: result.codeAnalysis?.routeGroups || 0,
-        middlewares: result.codeAnalysis?.middlewares || [],
-        dbTouchpoints: result.codeAnalysis?.dbQueries?.length || 0,
-        aiUnderstanding: result.summary,
-        routes: result.codeAnalysis?.routes || []
-      }
-    });
-
-    broadcastLog({
-      type: 'log',
-      level: result.confirmed ? 'success' : 'warn',
-      text: result.confirmed ? 'Stage 0 completed.' : 'Stage 0 stopped: authentication was not verified. See the authentication evidence.'
-    });
-  } catch (err) {
-    broadcastLog({
-      type: 'log',
-      level: 'error',
-      text: `✗ Error: ${err.message}`
-    });
-    broadcastLog({
-      type: 'stage_error',
-      stage: 0,
-      error: err.message
-    });
-  } finally {
-    currentRun.active = false;
-  }
+app.get('/api/memory', async (req, res) => {
+  try {
+    const source = parseRepository(req.query.repo);
+    const target = new URL(req.query.target);
+    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw new Error();
+    const key = projectKey(source, target.href);
+    const memory = await new ProjectMemory(key).load();
+    res.json({ key, exists: Boolean(memory.updatedAt), updatedAt: memory.updatedAt, status: memory.status, findings: memory.notes.length });
+  } catch { res.status(400).json({ error: 'Project memory could not be loaded.' }); }
 });
 
 // Stage 1 reads source independently of the target and authentication.

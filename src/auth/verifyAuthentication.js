@@ -64,12 +64,14 @@ export async function verifyAuthentication(options, http = axios) {
   const type = options.bearer ? 'Bearer token' : options.cookie ? 'Session cookie' : options.authId !== undefined && options.authId !== '' ? 'Login ID' : options.email || options.password ? 'Credentials' : 'unauthenticated';
   const outcome = (status, detail, extra = {}) => ({ valid: status === 'SUCCESS' || status === 'PUBLIC', authenticated: status === 'SUCCESS', status, type, detail, error: ['FAILED', 'UNVERIFIED'].includes(status) ? detail : null, evidence, ...extra });
   if (type === 'unauthenticated') return outcome('PUBLIC', 'No authentication requested.');
-  const requestOptions = { timeout: 8000, maxRedirects: 0, validateStatus: () => true };
+  const requestOptions = { timeout: 8000, maxRedirects: 0, maxContentLength: 2 * 1024 * 1024, validateStatus: () => true };
   const record = (step, url, response) => evidence.push({ step, endpoint: url.origin + url.pathname, httpStatus: response.status });
   let discovery;
-  try { discovery = await discoverAuthentication(options); }
+  try { discovery = options.authPlan ? { authIdField: options.authPlan.idField, verificationPaths: options.authPlan.checks.map(check => check.path) } : await discoverAuthentication(options); }
   catch { return outcome('UNVERIFIED', 'Authentication discovery could not be completed.'); }
-  options = { ...options, authIdField: options.authIdField || discovery.authIdField };
+  options = { ...options, authIdField: options.authIdField || discovery.authIdField, authLoginPath: options.authPlan?.loginPath || options.authLoginPath };
+  if (options.authPlan && ['Login ID', 'Credentials'].includes(type) && (options.authPlan.kind !== 'json-login' || !options.authLoginPath)) return outcome('UNVERIFIED', options.authPlan.kind === 'oauth' ? 'This app uses interactive OAuth. Supply the app session cookie or access token after signing in; Google consent or MFA cannot be completed from a repository alone.' : 'Source analysis did not identify a supported credential login. No login request was sent.');
+  if (options.authPlan && !options.authPlan.checks.length) return outcome('UNVERIFIED', 'Source analysis did not produce a supported protected access check. No login request was sent.');
   if (type === 'Login ID' && !options.authIdField) return outcome('UNVERIFIED', 'Could not determine a unique login ID field from the repository. No login request was sent.');
   let verifyUrl, loginUrl;
   let verificationUrls;
@@ -86,7 +88,8 @@ export async function verifyAuthentication(options, http = axios) {
     const field = options.authIdField || 'studentId';
     if (!/^[a-zA-Z][\w]{0,63}$/.test(field) || ['__proto__', 'constructor', 'prototype'].includes(field)) return outcome('UNVERIFIED', 'Invalid login ID field name.');
     if (type === 'Credentials' && (!options.email || !options.password)) return outcome('FAILED', 'Both email and password are required.');
-    const payload = type === 'Login ID' ? { [field]: options.authId } : { email: options.email, password: options.password };
+    if (type === 'Credentials' && options.authPlan && (!options.authPlan.emailField || !options.authPlan.passwordField)) return outcome('UNVERIFIED', 'The login request fields could not be determined from source.');
+    const payload = type === 'Login ID' ? { [field]: options.authId } : { [options.authPlan?.emailField || 'email']: options.email, [options.authPlan?.passwordField || 'password']: options.password };
     let response;
     try { response = await http.post(loginUrl.href, payload, requestOptions); }
     catch { return outcome('UNVERIFIED', 'Login request could not be completed. No session was verified.'); }
@@ -105,28 +108,43 @@ export async function verifyAuthentication(options, http = axios) {
   for (verifyUrl of verificationUrls) {
     cookie = receivedCookies ? sessionCookies(receivedCookies, loginUrl, verifyUrl) : pastedCookie;
     if (!bearer && !cookie) continue;
+    const planned = options.authPlan?.checks.find(check => check.path === verifyUrl.pathname);
+    const rejected = response => {
+      if ([401, 403].includes(response.status)) return true;
+      if (planned?.format !== 'html' || !planned.loginPath || ![301, 302, 303, 307, 308].includes(response.status)) return false;
+      try {
+        const location = new URL(response.headers?.location, verifyUrl);
+        return location.origin === verifyUrl.origin && location.pathname === planned.loginPath;
+      } catch { return false; }
+    };
     const check = async () => {
-      const headers = { Accept: 'application/json' };
+      const accept = planned?.format === 'html' ? 'text/html' : 'application/json';
+      const headers = { Accept: accept };
       if (bearer) headers.Authorization = `Bearer ${bearer}`;
       if (cookie) headers.Cookie = cookie;
       const invalidValue = `codestress-invalid-${randomBytes(16).toString('hex')}`;
-      const invalidHeaders = { Accept: 'application/json' };
+      const invalidHeaders = { Accept: accept };
       if (bearer) invalidHeaders.Authorization = `Bearer ${invalidValue}`;
       if (cookie) invalidHeaders.Cookie = cookie.split(';').map(pair => pair.trim().split('=')[0]).filter(Boolean).map(name => `${name}=${invalidValue}`).join('; ');
       let anonymous, invalid, authenticated;
       try {
-        anonymous = await http.get(verifyUrl.href, { ...requestOptions, headers: { Accept: 'application/json' } });
+        anonymous = await http.get(verifyUrl.href, { ...requestOptions, headers: { Accept: accept } });
         record('Without credentials', verifyUrl, anonymous);
-        if (!options.authVerifyPath && ![401, 403].includes(anonymous.status)) return outcome('UNVERIFIED', 'Candidate does not reject anonymous access.');
+        if (!options.authVerifyPath && !rejected(anonymous)) return outcome('UNVERIFIED', 'Candidate does not reject anonymous access.');
         invalid = await http.get(verifyUrl.href, { ...requestOptions, headers: invalidHeaders });
         record('With invalid credentials', verifyUrl, invalid);
-        if (!options.authVerifyPath && ![401, 403].includes(invalid.status)) return outcome('UNVERIFIED', 'Candidate accepts invalid credentials.');
+        if (!options.authVerifyPath && !rejected(invalid)) return outcome('UNVERIFIED', 'Candidate accepts invalid credentials.');
         authenticated = await http.get(verifyUrl.href, { ...requestOptions, headers });
         record('With credentials', verifyUrl, authenticated);
       } catch { return outcome('UNVERIFIED', 'The session verification request failed or timed out. No authenticated access was confirmed.'); }
-      if ([401, 403].includes(authenticated.status) || denied(authenticated.data)) return outcome('FAILED', 'The verification endpoint rejected authenticated access.');
-      if (![401, 403].includes(anonymous.status)) return outcome('UNVERIFIED', 'The verification endpoint did not deny anonymous access with HTTP 401/403. This candidate cannot establish a protected session.');
-      if (![401, 403].includes(invalid.status)) return outcome('UNVERIFIED', 'The verification endpoint did not reject deliberately invalid credentials. Authentication cannot be trusted from this endpoint.');
+      if (rejected(authenticated) || denied(authenticated.data)) return outcome('FAILED', 'The verification endpoint rejected authenticated access.');
+      if (!rejected(anonymous)) return outcome('UNVERIFIED', 'The verification endpoint did not deny anonymous access with HTTP 401/403. This candidate cannot establish a protected session.');
+      if (!rejected(invalid)) return outcome('UNVERIFIED', 'The verification endpoint did not reject deliberately invalid credentials. Authentication cannot be trusted from this endpoint.');
+      if (planned?.format === 'html') {
+        const html = typeof authenticated.data === 'string' ? authenticated.data : '';
+        if (authenticated.status !== 200 || !/text\/html/i.test(authenticated.headers?.['content-type'] || '') || !html.includes(planned.marker)) return outcome('UNVERIFIED', 'The protected page did not return its source-backed signed-in content.');
+        return outcome('SUCCESS', 'A source-backed protected page denied anonymous and invalid sessions, then returned the expected signed-in content. Protected access was verified; account identity was not independently checked.', { session: { bearer, cookie }, verificationKind: 'protected-page' });
+      }
       if (authenticated.status < 200 || authenticated.status >= 300 || !isJson(authenticated)) return outcome('UNVERIFIED', 'The authenticated request did not return a successful JSON session response.');
       const user = identity(authenticated.data);
       if (!user) return outcome('UNVERIFIED', 'The verification response did not identify an authenticated user.');

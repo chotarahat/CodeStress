@@ -87,9 +87,11 @@ export class Stage1Understand {
 
   async analyzeChunk(chunk, result, depth = 0) {
     try {
-      const note = await this.ask(CHUNK_INSTRUCTION, JSON.stringify(chunk));
+      const cached = this.options.cachedNotes?.find(note => note.complete && note.path === chunk.path && note.startLine === chunk.startLine && note.endLine === chunk.endLine);
+      const note = cached?.note || await this.ask(CHUNK_INSTRUCTION, JSON.stringify(chunk));
       const finding = { path: chunk.path, startLine: chunk.startLine, endLine: chunk.endLine, note, complete: true };
       result.chunkNotes.push(finding);
+      await this.options.onCheckpoint?.(result);
       this.emit({ type: 'understanding_note', data: finding });
       return true;
     } catch (error) {
@@ -106,6 +108,7 @@ export class Stage1Understand {
       if (error.partialText) {
         const finding = { ...gap, note: error.partialText, complete: false };
         result.chunkNotes.push(finding);
+        await this.options.onCheckpoint?.(result);
         this.emit({ type: 'understanding_note', data: finding });
       }
       this.emit({ type: 'log', level: 'warn', text: `Incomplete excerpt ${chunk.path}:${chunk.startLine}-${chunk.endLine}. Continuing with the remaining source.` });
@@ -130,7 +133,7 @@ export class Stage1Understand {
   }
 
   async execute() {
-    const repository = await new RepositoryReader({ ...this.options, onProgress: progress => this.emit({ type: 'reading_progress', ...progress }) }).read();
+    const repository = this.options.repository || await new RepositoryReader({ ...this.options, onProgress: progress => this.emit({ type: 'reading_progress', ...progress }) }).read();
     const analysis = new RouteScanner().analyze(repository);
     const result = {
       source: repository.source, coverage: repository.coverage, inventory: repository.inventory,

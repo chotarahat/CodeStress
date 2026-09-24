@@ -1130,3 +1130,7 @@ input:focus,select:focus {
 .auth-evidence { padding:16px 20px; margin-bottom:20px; font-size:14px; overflow-wrap:anywhere; }
 .auth-evidence summary { cursor:pointer; font-weight:600; }
 .auth-evidence p, .auth-evidence li { color:#bdc8c1; }
+
+.memory-panel { padding: 20px 24px; margin-bottom: 16px; }
+.memory-panel p { font-size: 16px; line-height: 1.6; margin: 10px 0; color: var(--text-secondary, #b4b4bd); }
+.memory-panel small { font-size: 14px; color: #a3d9b1; }

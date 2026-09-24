@@ -1,21 +1,43 @@
 # CodeStress
 Be the first to break your own code.
 
-## Stage 1: understand source
+## One assessment workflow
 
-In the GUI (`npm run gui`, port 9999), choose **Stage 1 · Understand codebase**.
-Paste either a local folder address (including Windows paths with spaces) or a
-public repository root such as `https://github.com/owner/repo`.
+In the GUI (`npm run gui`, port 9999), supply a target URL, a local repository
+folder or public GitHub root link, and any test credentials. Click **Start assessment**.
+There is no stage selector or separate read-source button in the GUI.
 
-- **Read source only** opens source files and shows the inventory. It does not call
-  the AI, contact the target website, authenticate, execute repository code, or run tests.
-- **Understand codebase** reads eligible source and sends it to the configured
-  Ollama engine in numbered file excerpts. It produces architecture, data flow,
-  business-rule, authentication and validation findings with file/line references,
-  plus hypotheses for future tests. It does not execute those tests.
-- **Files** shows read/excluded/skipped/failed entries, byte counts, line counts,
-  SHA-256 hashes, AI coverage and the GitHub commit. Download the JSON report to
-  retain this evidence and the per-chunk AI notes. Raw source is not in that download.
+The workflow checks target reachability, reads source, builds AI understanding,
+saves its findings, then plans and verifies authentication from the source.
+The AI can request additional file/line ranges from the in-memory source snapshot
+to trace routes, imports, middleware and templates before producing its plan.
+Cookie/token checks can be reconsidered once using observed HTTP evidence;
+password logins are never repeated automatically. Source instructions are untrusted
+and are not executed. Authentication uses bounded HTTP operations, not arbitrary
+AI-generated commands.
+
+**Files** shows read/excluded/skipped/failed entries, hashes and AI coverage.
+**AI summary** shows architecture, business rules and findings with source references.
+The downloadable report includes the completed authentication evidence.
+Incomplete understanding remains clearly marked and is not proof of correctness.
+
+### Project memory workspace
+
+Each repository and target origin has a local workspace under
+`.codestress/memory/<project-key>/memory.json`. Findings are checkpointed after each
+completed excerpt, then the report, source fingerprint, authentication plan and
+HTTP evidence are saved. The next assessment rereads source and reuses completed
+findings only when the source fingerprint and AI model match. Changed source is
+reanalyzed; old authentication success is never reused as proof of current access.
+The GUI displays saved-memory status when a project is selected.
+
+Supplied credentials are not part of the saved report or model prompt; known supplied
+secret values are redacted from persisted string values. Ordinary source may still
+contain embedded secrets; source filename exclusions are not a secret scanner.
+The memory directory is excluded from source reading and Git. This is a persistent
+knowledge workspace, **not an OS/container sandbox or command runner**. No tests or
+repository commands run automatically. Raw source is reread on each assessment;
+it is not copied into memory files, though AI notes may quote excerpts.
 
 CLI alternatives (do not require a running GUI or target):
 
@@ -66,7 +88,7 @@ report should not be treated as readiness to run adversarial tests.
 Repository-reader and Stage 1 tests are in `test/repository-understanding.test.js`.
 They use temporary local folders, a mocked GitHub API and a mocked AI; no public
 repository or external AI is contacted. Run `npm test` only when authorized.
-PIN authentication has been removed. Stage 0's other authentication methods remain.
+PIN authentication has been removed. Cookie, bearer, Login ID and email/password inputs remain.
 
 ### Recovering from AI output limits
 
@@ -85,8 +107,8 @@ failures stop further requests. Only completed findings feed the synthesis. The
 final report is generated in four separate sections, retaining any earlier sections
 if a later one fails. Individual source findings, including clearly marked partial
 answer text, appear in the GUI and downloadable JSON. Reasoning traces are not saved.
-These findings live in server memory for the current run; download the report before
-restarting the server or beginning a new run.
+Unified GUI assessments checkpoint these findings into project memory. Standalone
+CLI source-analysis runs retain their existing downloadable/printed report behavior.
 
 ### From understanding to execution
 
@@ -104,41 +126,36 @@ must not be run without the user's permission.
 
 ## Authentication evidence
 
-Stage 0 does not infer authenticated access from HTTP 200, a login response's
-`success` flag, a user lookup, or a `firstLogin`/onboarding response. It never invents
-a user and never silently switches from the configured target to another port.
+The unified GUI uses an AI plan grounded in exact source lines, rather than a fixed
+list of guessed `/api/me` endpoints. The planner can reread up to six file ranges
+per round for three rounds. Only same-origin HTTP paths and supported operations
+are admitted. Source citations must match the actual snapshot. Login path and
+request fields are discovered automatically; ambiguous or unsupported plans stop
+without submitting credentials. No AI-generated shell commands are executed.
 
-For Login ID or email/password, configure the login endpoint. CodeStress reads
-local or GitHub source to infer the login ID field from supported Express routes
-and their direct router mounts. Ambiguous fields stop the login attempt.
-The GUI no longer requires a login field name or protected session endpoint.
-Current-user routes discovered in source are checked first, followed by a bounded
-list of common session paths on the target origin. Unsupported routing patterns
-may not be discovered. If the API lives on a different port, set the target to
-that API origin; credentials are never forwarded to another origin or redirects.
+For JSON session routes, verification requires anonymous and invalid credentials
+to be rejected, then a successful JSON response identifying the signed-in user.
+For source-backed protected HTML pages, anonymous and invalid sessions must receive
+401/403 or a redirect to the identified same-origin login path; the real session
+must return HTTP 200 HTML with a source-backed authenticated-content marker.
+HTML verification proves protected access, not independently verified account identity.
+Public SPA shells do not pass this check. Redirects are observed, never followed.
+Credentials are not sent to another origin or automatically guessed backend port.
 
-For cookie authentication, paste request cookie pairs (`session=…; other=…`),
-optionally with the `Cookie:` prefix. Values retain their encoding and embedded
-`=` characters. Copy the request header, not a Set-Cookie response or cookie table.
-Anonymous and invalid-cookie checks happen before the real cookie is sent to an
-automatically discovered candidate. Cookie values are excluded from UI evidence.
+OAuth uses the application's existing session cookie/token. Repository access cannot
+complete Google consent, MFA or CAPTCHA. Fresh OAuth sign-in, client-side browser
+flows, CSRF-dependent form submissions and separate API origins may require additional
+integration; the current runner reports these limits rather than inventing success.
+A repo and credentials enable discovery but do not guarantee every app can be logged in.
 
-**Verified** requires a reusable token/cookie, HTTP 401/403 without credentials,
-HTTP 401/403 with deliberately invalid credentials, and a successful JSON response
-identifying the account with the supplied session. For Login ID or credentials,
-that identity must match the submitted account field. Redirects are not followed.
-The GUI displays endpoint/status evidence without tokens or passwords.
+For cookies, paste request `name=value; other=value` pairs or the full `Cookie:`
+header. Do not paste a Set-Cookie response or browser cookie table. Encoded values
+and embedded equals signs are preserved. Real cookies are sent to discovered
+candidates only after anonymous and invalid-cookie controls reject access.
+HTTP 200 alone, onboarding responses and public account lookups never prove login.
 
-**Rejected** means the login or verification API rejected the request.
-**Unverified** means evidence was missing, ambiguous or unavailable. A valid account
-can still be unverified if the app does not expose a suitable session-check endpoint.
-This verifies only the configured access check, not overall authentication security.
-ID syntax is app-specific; a scanner must not mistake frontend validation for backend
-validation. Source analysis can reveal a mismatch independently of session proof.
-
-Unverified/rejected authentication stops Stage 0 before AI analysis or further
-testing. Source reading for authentication discovery happens before verification. Source-only Stage 1 remains available separately.
-CLI supports `--auth-login-path` and optional discovery overrides `--auth-id-field`
-and `--auth-verify-path`.
-Regression cases are in `test/auth-verification.test.js`; they use mocked requests
-and must not be run without permission.
+Legacy CLI Stage 0 retains its heuristic discovery and optional overrides
+`--auth-login-path`, `--auth-id-field`, and `--auth-verify-path`.
+Source-only CLI commands remain available. The GUI always uses the unified workflow.
+Regression cases are in `test/unified-assessment.test.js` and
+`test/auth-verification.test.js`; they use mocks and must not run without permission.

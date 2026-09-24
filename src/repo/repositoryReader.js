@@ -4,8 +4,8 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { Octokit } from '@octokit/rest';
 
-const excludedDirs = new Set(['.git', 'node_modules', 'vendor', 'dist', 'build', '.next', 'coverage', '.venv', 'venv', '__pycache__', '.cache', '.idea', '.vscode']);
-const sourceExtensions = new Set('.js .mjs .cjs .ts .tsx .jsx .py .pyi .java .kt .kts .go .rs .rb .php .cs .fs .vb .c .h .cpp .hpp .cc .swift .scala .ex .exs .erl .clj .vue .svelte .html .htm .css .scss .sass .less .sql .graphql .gql .prisma .proto .json .yaml .yml .toml .xml .md .mdx .txt .sh .ps1 .bat .ini .cfg .conf .gradle .tf .hcl .r .dart .lua'.split(' '));
+const excludedDirs = new Set(['.git', '.codestress', 'node_modules', 'vendor', 'dist', 'build', '.next', 'coverage', '.venv', 'venv', '__pycache__', '.cache', '.idea', '.vscode']);
+const sourceExtensions = new Set('.js .mjs .cjs .ts .tsx .jsx .py .pyi .java .kt .kts .go .rs .rb .php .cs .fs .vb .c .h .cpp .hpp .cc .swift .scala .ex .exs .erl .clj .vue .svelte .html .htm .ejs .hbs .handlebars .pug .njk .jinja .jinja2 .j2 .erb .astro .css .scss .sass .less .sql .graphql .gql .prisma .proto .json .yaml .yml .toml .xml .md .mdx .txt .sh .ps1 .bat .ini .cfg .conf .gradle .tf .hcl .r .dart .lua'.split(' '));
 const excludedFiles = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb', 'poetry.lock', 'cargo.lock', 'composer.lock']);
 const specialFiles = new Set(['dockerfile', 'makefile', 'gemfile', 'procfile', '.gitignore', '.dockerignore']);
 
