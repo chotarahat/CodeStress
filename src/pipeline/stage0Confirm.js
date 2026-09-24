@@ -3,9 +3,11 @@ import chalk from 'chalk';
 import readline from 'readline';
 import { RouteScanner } from '../repo/routeScanner.js';
 import { AIClient } from '../engine/aiClient.js';
+import { verifyAuthentication } from '../auth/verifyAuthentication.js';
 
 export class Stage0Confirm {
   constructor(options = {}) {
+    this.options = options;
     this.target = options.target;
     this.repo = options.repo || process.cwd();
     this.token = options.token;
@@ -45,136 +47,14 @@ export class Stage0Confirm {
    * Test authentication credentials or tokens
    */
   async testAuth() {
-    process.stdout.write(chalk.gray('  → Testing authentication... '));
-
-    const headers = {};
-    let authType = 'none';
-
-    if (this.bearer) {
-      authType = 'Bearer token';
-      headers['Authorization'] = `Bearer ${this.bearer.replace(/^Bearer\s+/i, '')}`;
-    } else if (this.cookie) {
-      authType = 'Session cookie';
-      headers['Cookie'] = this.cookie;
-    } else if (this.authId) {
-      authType = `Login ID (${this.authId})`;
-      const loginPaths = ['/api/auth/login', '/api/login', '/login', '/api/users/login'];
-      const payloadKeys = ['studentId', 'id', 'username', 'code', 'userId'];
-      let loginSuccess = false;
-
-      for (const p of loginPaths) {
-        for (const key of payloadKeys) {
-          try {
-            const res = await axios.post(`${this.target.replace(/\/+$/, '')}${p}`, {
-              [key]: this.authId
-            }, { timeout: 4000, validateStatus: () => true });
-
-            if (res.status >= 200 && res.status < 300) {
-              loginSuccess = true;
-              this.isFirstLogin = Boolean(res.data?.firstLogin);
-              this.authenticatedUser = res.data?.user || { studentId: this.authId, isNewUser: true };
-              if (res.headers['set-cookie']) {
-                this.cookie = res.headers['set-cookie'].join('; ');
-              }
-              if (res.data?.token || res.data?.accessToken) {
-                this.bearer = res.data.token || res.data.accessToken;
-              }
-              break;
-            }
-          } catch (e) {
-            // continue checking
-          }
-        }
-        if (loginSuccess) break;
-      }
-
-      // If probe on target failed, and target is on port 3000 (React dev server), check port 5000 backend
-      if (!loginSuccess && this.target.includes(':3000')) {
-        for (const key of payloadKeys) {
-          try {
-            const res = await axios.post('http://localhost:5000/api/auth/login', {
-              [key]: this.authId
-            }, { timeout: 2000, validateStatus: () => true });
-
-            if (res.status >= 200 && res.status < 300) {
-              loginSuccess = true;
-              this.isFirstLogin = Boolean(res.data?.firstLogin);
-              this.authenticatedUser = res.data?.user || { studentId: this.authId, isNewUser: true };
-              console.log(chalk.cyan(`\n  💡 Note: Automatically linked to active backend API on http://localhost:5000`));
-              break;
-            }
-          } catch (e) {}
-        }
-      }
-
-      if (loginSuccess) {
-        const userTypeLabel = this.isFirstLogin ? 'New Student Registration' : 'Existing Student Profile';
-        console.log(chalk.green(`Authenticated with ID ${this.authId} (${userTypeLabel}) ✓`));
-        return {
-          valid: true,
-          authenticated: true,
-          status: 'SUCCESS',
-          type: authType,
-          user: this.authenticatedUser,
-          isFirstLogin: this.isFirstLogin
-        };
-      } else {
-        console.log(chalk.red(`Failed to authenticate with ID ${this.authId} on ${this.target} ✗`));
-        return { valid: false, authenticated: false, status: 'FAILED', type: authType, error: 'Login rejected or route not found' };
-      }
-    } else if (this.email && this.password) {
-      authType = `Credentials (${this.email})`;
-      // Attempt login check against common login paths if available
-      const loginPaths = ['/api/login', '/api/auth/login', '/login', '/api/users/login'];
-      let loginSuccess = false;
-      for (const p of loginPaths) {
-        try {
-          const res = await axios.post(`${this.target.replace(/\/+$/, '')}${p}`, {
-            email: this.email,
-            password: this.password
-          }, { timeout: 4000, validateStatus: () => true });
-
-          if (res.status >= 200 && res.status < 300) {
-            loginSuccess = true;
-            // Capture cookie or token if returned
-            if (res.headers['set-cookie']) {
-              this.cookie = res.headers['set-cookie'].join('; ');
-            }
-            if (res.data?.token || res.data?.accessToken) {
-              this.bearer = res.data.token || res.data.accessToken;
-            }
-            break;
-          }
-        } catch (e) {
-          // continue checking
-        }
-      }
-
-      if (loginSuccess) {
-        console.log(chalk.green(`Login credentials authenticated ✓`));
-        return { valid: true, authenticated: true, status: 'SUCCESS', type: authType };
-      } else {
-        console.log(chalk.red(`Login credentials failed on ${this.target} ✗`));
-        return { valid: false, authenticated: false, status: 'FAILED', type: authType, error: 'Login rejected' };
-      }
-    } else {
-      console.log(chalk.yellow(`No auth provided — testing in public unauthenticated mode`));
-      return { valid: true, authenticated: false, status: 'PUBLIC', type: 'unauthenticated' };
+    const result = await verifyAuthentication(this.options);
+    if (result.authenticated) {
+      this.bearer = result.session.bearer;
+      this.cookie = result.session.cookie;
     }
-
-    // If token or cookie passed, probe target to confirm
-    try {
-      const probeRes = await axios.get(this.target, {
-        headers,
-        timeout: 5000,
-        validateStatus: () => true
-      });
-      console.log(chalk.green(`${authType} configured and active ✓`));
-      return { valid: true, authenticated: true, status: 'SUCCESS', type: authType, responseStatus: probeRes.status };
-    } catch (err) {
-      console.log(chalk.yellow(`${authType} attached (probe response: ${err.message})`));
-      return { valid: true, authenticated: true, status: 'SUCCESS', type: authType };
-    }
+    const { session, ...publicResult } = result;
+    console.log(`Authentication: ${result.status} — ${result.detail}`);
+    return publicResult;
   }
 
   /**
@@ -231,6 +111,10 @@ export class Stage0Confirm {
 
     // 2. Test authentication
     const authResult = await this.testAuth();
+    this.options.onAuthResult?.(authResult);
+    if (!['SUCCESS', 'PUBLIC'].includes(authResult.status)) {
+      return { confirmed: false, target: this.target, pingResult, authResult, codeAnalysis: null, summary: 'Authentication was not verified. AI analysis and further testing were not started.' };
+    }
 
     // 3. Count routes in repo
     const codeAnalysis = await this.discoverRoutes();
@@ -244,7 +128,7 @@ export class Stage0Confirm {
     console.log(chalk.bold('Target Overview:'));
     const authBadge = authResult.status === 'SUCCESS'
       ? chalk.bold.green(`SUCCESS [${authResult.type}] ✓`)
-      : (authResult.status === 'FAILED' ? chalk.bold.red(`FAILED [${authResult.type}] ✗`) : chalk.yellow('PUBLIC (Unauthenticated)'));
+      : (authResult.status === 'FAILED' ? chalk.bold.red(`FAILED [${authResult.type}] ✗`) : chalk.yellow(`${authResult.status}: ${authResult.detail}`));
     console.log(`  • Auth State       : ${authBadge}`);
     if (authResult.user?.studentId) {
       console.log(`  • Logged in User   : ${chalk.cyan(`ID: ${authResult.user.studentId} (${authResult.user.stream || 'Student'})`)}`);
@@ -255,9 +139,9 @@ export class Stage0Confirm {
     console.log(`  • AI Understanding : ${chalk.italic.white(summary)}`);
 
     // 5. Ask user confirmation
-    const confirmed = await this.askUserConfirmation();
+    const confirmed = ['SUCCESS', 'PUBLIC'].includes(authResult.status) && await this.askUserConfirmation();
     if (!confirmed) {
-      console.log(chalk.red('\nAdversarial testing cancelled by user.'));
+      console.log(chalk.yellow('\nNot advancing: authentication is unverified/rejected, or confirmation was declined.'));
       return { confirmed: false, codeAnalysis, authResult, summary };
     }
 

@@ -27,6 +27,9 @@ program
   .option('--email <email>', 'Login email for credentialed testing')
   .option('--password <password>', 'Login password for credentialed testing')
   .option('--auth-id <code>', 'Single login ID, student ID, access code or username (e.g. 24101128)')
+  .option('--auth-login-path <path>', 'Exact login endpoint on the target', '/api/auth/login')
+  .option('--auth-id-field <field>', 'Override the automatically discovered login ID JSON field')
+  .option('--auth-verify-path <path>', 'Protected current-user GET endpoint for session verification')
   .option('-o, --output <file>', 'Output report path', 'CODESTRESS.md')
   .option('-y, --yes', 'Automatically answer yes to confirmation prompts', false)
   .action(async (target, options) => {
@@ -71,13 +74,17 @@ program
         email: options.email,
         password: options.password,
         authId: options.authId,
+        authLoginPath: options.authLoginPath,
+        authIdField: options.authIdField,
+        authVerifyPath: options.authVerifyPath,
         yes: options.yes
       });
 
       const stage0Result = await stage0.execute();
 
       if (!stage0Result.confirmed) {
-        process.exit(0);
+        process.exitCode = stage0Result.authResult?.status === 'PUBLIC' || stage0Result.authResult?.authenticated ? 0 : 1;
+        return;
       }
 
       // Next stages will hook in here as we build them out

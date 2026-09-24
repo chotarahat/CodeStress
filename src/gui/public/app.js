@@ -1,6 +1,7 @@
 const $ = id => document.getElementById(id);
 let routes = [], eventCount = 0, running = false, streamReady = false, toastTimer;
 let sourceReport = null;
+let lastAuthResult = null;
 const tabs = ['Activity', 'Routes', 'Summary', 'Files'];
 
 async function apiRequest(endpoint, options = {}) {
@@ -48,6 +49,7 @@ $('authType').addEventListener('change', () => {
     $(id).hidden = mode !== $('authType').value;
     $(id).querySelectorAll('input').forEach(input => { input.required = !$(id).hidden; input.disabled = $(id).hidden; });
   });
+  syncAuthEndpoints();
   $('authHint').textContent = $('authType').value === 'none' ? 'Assess publicly accessible routes.' : 'Use a test account for authenticated access.';
 });
 $('authType').dispatchEvent(new Event('change'));
@@ -78,7 +80,8 @@ function renderRoutes() {
 }
 $('routeSearch').addEventListener('input', renderRoutes);
 function resetResults() {
-  sourceReport = null; $('fileInventory').replaceChildren(); $('coverageText').textContent = 'Waiting for source reading…'; $('btnDownload').disabled = true;
+  lastAuthResult = null; $('authEvidence').hidden = true;
+  sourceReport = null; $('aiFindings').replaceChildren(); $('testCommands').replaceChildren(); $('fileInventory').replaceChildren(); $('coverageText').textContent = 'Waiting for source reading…'; $('btnDownload').disabled = true;
   routes = []; $('routeSearch').value = ''; $('fileSearch').value = ''; renderRoutes(); $('routeCountLabel').textContent = $('navCount').textContent = '0';
   $('statStatus').textContent = 'Checking…'; $('statStatus').className = ''; $('statStatusDetails').textContent = 'Confirming your target';
   $('statAuth').textContent = 'Pending'; $('statAuth').className = ''; $('statAuthDetails').textContent = 'Waiting for verification';
@@ -87,10 +90,20 @@ function resetResults() {
 }
 function fail(message) {
   setRunning(false, 'Failed'); $('statStatus').textContent = 'Incomplete'; $('statStatus').className = 'error-text'; $('statStatusDetails').textContent = 'See activity for details';
-  $('statAuth').textContent = $('assessmentMode').value === 'understand' ? '—' : 'Unverified'; $('statAuthDetails').textContent = 'Assessment did not complete'; $('statGroups').textContent = 'No results available';
+  if (!lastAuthResult) { $('statAuth').textContent = $('assessmentMode').value === 'understand' ? '—' : 'Unverified'; $('statAuthDetails').textContent = 'Assessment did not complete'; } $('statGroups').textContent = 'No results available';
   $('formError').textContent = message; $('formError').hidden = false; appendLog(message, 'error');
 }
 function handleStreamEvent(event) {
+  if (event.type === 'authentication_result') renderAuthentication(event.data);
+  if (event.type === 'understanding_coverage' && sourceReport) {
+    sourceReport.aiCoverage = event.data;
+    updateCoverageText(sourceReport);
+  }
+  if (event.type === 'understanding_note' && sourceReport) {
+    sourceReport.chunkNotes.push(event.data);
+    appendSourceFinding(event.data);
+    $('aiText').textContent = 'Reading source. Completed findings appear below; the report will follow.';
+  }
   if (event.type === 'repository_read') renderSourceReport(event.data, true);
   if (event.type === 'reading_progress') appendLog(`Read ${event.filesRead} source files · ${event.path}`);
   if (event.type === 'understanding_progress') appendLog(`AI reading chunk ${event.current}/${event.total} · ${event.path}`);
@@ -102,10 +115,10 @@ function handleStreamEvent(event) {
     $('assessmentMode').value = 'confirm'; syncMode();
     const data = event.data || {}; setRunning(false, 'Complete');
     $('statStatus').textContent = data.reachable ? 'Reachable' : 'Unreachable'; $('statStatus').className = data.reachable ? 'success' : 'error-text'; $('statStatusDetails').textContent = 'Target confirmation complete';
-    const status = String(data.authStatus || '').toUpperCase(); const mode = String(data.authMode || '').toLowerCase(); const publicMode = !mode || mode === 'none' || mode === 'unauthenticated';
-    $('statAuth').textContent = publicMode ? 'Public' : status === 'SUCCESS' ? 'Verified' : 'Failed'; $('statAuth').className = !publicMode && status === 'FAILED' ? 'error-text' : '';
-    $('statAuthDetails').textContent = publicMode ? 'Unauthenticated assessment' : data.authError || data.authMode || 'Session verified';
-    $('statEndpoints').textContent = data.endpointsCount ?? 0; $('statGroups').textContent = `${data.routeGroupsCount || 0} route groups discovered`;
+    renderAuthentication({ status: data.authStatus, type: data.authMode, authenticated: data.authVerified === true, detail: data.authDetail || data.authError, evidence: data.authEvidence || [] });
+    if (data.confirmed === false) setRunning(false, 'Needs attention');
+    $('statEndpoints').textContent = data.sourceScanned === false ? '—' : data.endpointsCount ?? 0;
+    $('statGroups').textContent = data.sourceScanned === false ? 'Source scan not started' : `${data.routeGroupsCount || 0} route groups discovered`;
     routes = Array.isArray(data.routes) ? data.routes : []; $('routeCountLabel').textContent = $('navCount').textContent = routes.length; renderRoutes();
     $('aiText').textContent = data.aiUnderstanding || 'No AI summary was returned for this assessment.'; $('aiText').className = 'summary-text';
   }
@@ -116,18 +129,18 @@ $('attackForm').addEventListener('submit', async event => {
   const target = $('targetUrl').value.trim();
   try { if (!understand && !['http:', 'https:'].includes(new URL(target).protocol)) throw new Error(); } catch { $('formError').textContent = 'Enter a valid HTTP or HTTPS target URL.'; $('formError').hidden = false; return; }
   const payload = understand ? { repo: $('repoPath').value.trim(), readOnly: event.submitter?.value === 'read' } : {target, repo: $('repoPath').value.trim()}; const mode = understand ? 'none' : $('authType').value;
-  if (mode === 'authId') payload.authId = $('authIdInput').value.trim();
+  if (mode === 'authId') { payload.authId = $('authIdInput').value.trim(); }
+  if (['authId', 'credentials'].includes(mode)) payload.authLoginPath = $('authLoginPath').value.trim();
   if (mode === 'bearer') payload.bearer = $('bearerInput').value.trim();
   if (mode === 'cookie') payload.cookie = $('cookieInput').value.trim();
   if (mode === 'credentials') { payload.email = $('emailInput').value.trim(); payload.password = $('passwordInput').value; }
   resetResults(); setRunning(true, 'Starting'); selectTab('Activity'); appendLog(understand ? 'Reading repository source…' : `Starting assessment · ${target}`);
   if (understand) { $('statAuth').textContent = '—'; $('statAuthDetails').textContent = 'Reading source files'; $('statStatusDetails').textContent = 'Opening repository'; }
   try {
-    if (understand) {
-      const status = await apiRequest('/api/status');
-      if (!status.capabilities?.includes('source-understanding')) {
-        throw new Error('An older CodeStress server is running without Stage 1 support. Stop that process, run npm run gui again, and refresh this page.');
-      }
+    const serverStatus = await apiRequest('/api/status');
+    const capability = understand ? 'source-understanding' : 'automatic-auth-discovery';
+    if (!serverStatus.capabilities?.includes(capability)) {
+      throw new Error('An older CodeStress server is running. Stop it, run npm run gui again, and refresh this page to use the updated checks.');
     }
     const data = await apiRequest(understand ? '/api/understand' : '/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     if (!data.success) throw new Error(data.error || 'Could not start assessment.');
@@ -149,6 +162,7 @@ function syncMode() {
   $('targetField').hidden = understand; $('targetUrl').disabled = understand; $('targetUrl').required = !understand;
   $('authFields').hidden = understand;
   $('authFields').querySelectorAll('input, select').forEach(input => { input.disabled = understand || Boolean(input.closest('.auth-field')?.hidden); });
+  syncAuthEndpoints();
   $('repoPath').required = understand; $('btnRead').hidden = !understand;
   $('statusLabel').textContent = understand ? 'SOURCE STATUS' : 'TARGET STATUS';
   $('authLabel').textContent = understand ? 'FILES READ' : 'AUTHENTICATION';
@@ -178,9 +192,9 @@ function renderSourceReport(data, reading = false) {
   $('statEndpoints').textContent = data.endpointsCount; $('statGroups').textContent = 'Heuristic route matches';
   routes = data.routes || []; $('routeCountLabel').textContent = $('navCount').textContent = routes.length; renderRoutes();
   const ai = data.aiCoverage;
-  $('coverageText').textContent = `${coverage.filesRead} files read · ${coverage.bytesRead.toLocaleString()} bytes · ${coverage.excludedEntries} excluded entries · ${coverage.skippedFiles} skipped · ${coverage.failedEntries} failed. AI: ${ai.filesAnalyzed} files, ${ai.analyzedChunks}/${ai.totalChunks} source chunks. ${data.source.commit ? `Commit: ${data.source.commit}` : 'Local snapshot: file hashes recorded at read time.'}`;
-  $('aiText').textContent = [data.error, data.aiUnderstanding || (data.aiStatus === 'not_requested' ? 'Source reading completed. AI analysis has not been requested. Review Files, then choose Understand codebase.' : reading ? 'Source reading completed. AI analysis is pending…' : 'AI understanding is unavailable. Source inventory remains available.')].filter(Boolean).join('\n\n');
-  $('aiText').className = 'summary-text'; $('btnDownload').disabled = false; renderInventory();
+  updateCoverageText(data);
+  $('aiText').textContent = [data.error, data.aiUnderstanding || (data.aiStatus === 'not_requested' ? 'Source reading completed. AI analysis has not been requested. Review Files, then choose Understand codebase.' : reading ? 'Source reading completed. AI analysis is pending…' : data.chunkNotes?.length ? 'The overall report is incomplete. Source findings collected so far are available below.' : 'No AI findings have been completed yet. Source inventory remains available.')].filter(Boolean).join('\n\n');
+  $('aiText').className = 'summary-text'; $('btnDownload').disabled = false; renderInventory(); renderFindings(data);
   if (!reading) {
     const state = data.aiStatus === 'not_requested' ? (coverage.complete && coverage.filesRead ? 'Source read' : 'Partial read') : data.aiStatus === 'complete' ? 'Complete' : data.aiStatus === 'partial' ? 'Partial' : 'AI unavailable';
     setRunning(false, state); appendLog(`${state} · ${coverage.filesRead} files read, ${ai.analyzedChunks}/${ai.totalChunks} AI chunks`, data.error ? 'warn' : 'success');
@@ -193,3 +207,58 @@ $('btnDownload').addEventListener('click', () => {
   const url = URL.createObjectURL(new Blob([JSON.stringify(sourceReport, null, 2)], {type:'application/json'}));
   const link = document.createElement('a'); link.href = url; link.download = 'codestress-understanding.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+
+function updateCoverageText(data) {
+  const { coverage, aiCoverage: ai } = data;
+  $('coverageText').textContent = `${coverage.filesRead} files read · ${coverage.bytesRead.toLocaleString()} bytes · ${coverage.excludedEntries} excluded entries · ${coverage.skippedFiles} skipped · ${coverage.failedEntries} failed. AI: ${ai.filesAnalyzed} files, ${ai.analyzedChunks}/${ai.totalChunks} source chunks. ${data.source.commit ? `Commit: ${data.source.commit}` : 'Local snapshot: file hashes recorded at read time.'}`;
+}
+function appendSourceFinding(finding) {
+  const item = document.createElement('details'); item.className = 'file-entry';
+  const title = document.createElement('summary');
+  title.textContent = `${finding.complete === false ? 'INCOMPLETE · ' : ''}${finding.path}:${finding.startLine}-${finding.endLine}`;
+  const body = document.createElement('div'); body.className = 'summary-text'; body.textContent = finding.note;
+  item.append(title, body); $('aiFindings').append(item);
+}
+function renderFindings(data) {
+  $('aiFindings').replaceChildren(); $('testCommands').replaceChildren();
+  for (const finding of data.chunkNotes || []) appendSourceFinding(finding);
+  for (const gap of data.analysisGaps || []) {
+    const message = document.createElement('p'); message.className = 'error-text';
+    message.textContent = `Incomplete: ${gap.path}:${gap.startLine}-${gap.endLine} · ${gap.reason}`;
+    $('aiFindings').append(message);
+  }
+  if (data.testCommands?.length) {
+    const title = document.createElement('h3'); title.textContent = 'Declared checks · not run';
+    const note = document.createElement('p'); note.textContent = 'These scripts were found in the repository. Execution is not implemented; review the scripts and approve a separate run before testing.';
+    $('testCommands').append(title, note);
+    for (const command of data.testCommands) {
+      const item = document.createElement('details'); item.className = 'file-entry';
+      const label = document.createElement('summary'); label.textContent = `${command.executable} ${command.args.join(' ')} · ${command.directory}`;
+      const body = document.createElement('pre'); body.textContent = `${command.manifest}\nScript: ${command.script}\nPre-script: ${command.before || '(none)'}\nPost-script: ${command.after || '(none)'}`;
+      item.append(label, body); $('testCommands').append(item);
+    }
+  }
+}
+
+function syncAuthEndpoints() {
+  const enabled = $('assessmentMode').value === 'confirm';
+  const mode = $('authType').value;
+  $('loginEndpointGroup').hidden = !enabled || !['authId', 'credentials'].includes(mode);
+  $('authLoginPath').disabled = $('loginEndpointGroup').hidden;
+  $('authLoginPath').required = !$('loginEndpointGroup').hidden;
+}
+function renderAuthentication(result) {
+  lastAuthResult = result;
+  const verified = result.status === 'SUCCESS' && result.authenticated === true;
+  const publicMode = result.status === 'PUBLIC' && result.type === 'unauthenticated';
+  $('statAuth').textContent = publicMode ? 'Public' : verified ? 'Verified' : result.status === 'FAILED' ? 'Rejected' : 'Unverified';
+  $('statAuth').className = verified ? 'success' : result.status === 'FAILED' ? 'error-text' : '';
+  const detail = result.detail || (publicMode ? 'No authentication requested.' : 'No session verification evidence was supplied.');
+  $('statAuthDetails').textContent = publicMode ? detail : 'See authentication evidence below';
+  $('authEvidence').hidden = publicMode;
+  $('authEvidenceDetail').textContent = detail;
+  $('authEvidenceList').replaceChildren();
+  for (const check of result.evidence || []) {
+    const row = document.createElement('li'); row.textContent = `${check.step}: ${check.endpoint} → HTTP ${check.httpStatus}`; $('authEvidenceList').append(row);
+  }
+}

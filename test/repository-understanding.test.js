@@ -92,3 +92,66 @@ test('AI failure and source chunk caps preserve inventory without claiming compl
   const partial = await new Stage1Understand({ repo: root, maxChunks: 1, ai: { analyzeSource: async () => 'Partial findings' } }).execute();
   assert.equal(partial.aiStatus, 'partial'); assert.equal(partial.aiCoverage.filesAnalyzed, 0); assert.equal(partial.inventory[0].aiAnalyzed, false);
 }));
+
+test('truncated excerpts are subdivided, preserving content and coverage', async () => fixture(async root => {
+  const content = Array.from({ length: 100 }, (_, i) => `const value${i} = '${'x'.repeat(40)}';`).join('\n');
+  await fs.writeFile(path.join(root, 'app.js'), content);
+  const accepted = [];
+  const ai = { analyzeSource: async (instruction, source) => {
+    if (instruction.startsWith('Explain this source excerpt')) {
+      const chunk = JSON.parse(source);
+      if (chunk.content.length > 3300) throw Object.assign(new Error('truncated'), { code: 'AI_OUTPUT_LIMIT', partialText: 'not complete' });
+      accepted.push(chunk.content); return 'Source finding at app.js:1';
+    }
+    return 'Report section';
+  } };
+  const result = await new Stage1Understand({ repo: root, ai }).execute();
+  assert.equal(result.aiStatus, 'complete');
+  assert.equal(result.aiCoverage.filesAnalyzed, 1);
+  assert.ok(accepted.length > 1);
+  assert.ok(accepted.join('').includes('value99'));
+  assert.ok(result.chunkNotes.every(note => note.complete));
+}));
+
+test('a permanently truncated file does not discard findings from later files', async () => fixture(async root => {
+  await fs.writeFile(path.join(root, 'a.js'), 'const first = true;');
+  await fs.writeFile(path.join(root, 'b.js'), 'const later = true;');
+  const ai = { analyzeSource: async (instruction, source) => {
+    if (instruction.startsWith('Explain this source excerpt') && JSON.parse(source).path === 'a.js') throw Object.assign(new Error('truncated'), { code: 'AI_OUTPUT_LIMIT', partialText: 'Partial a.js finding' });
+    return 'Complete finding';
+  } };
+  const result = await new Stage1Understand({ repo: root, ai }).execute();
+  assert.equal(result.aiStatus, 'partial');
+  assert.equal(result.aiCoverage.filesAnalyzed, 1);
+  assert.ok(result.chunkNotes.some(note => note.path === 'a.js' && !note.complete));
+  assert.ok(result.chunkNotes.some(note => note.path === 'b.js' && note.complete));
+  assert.equal(result.analysisGaps.length, 1);
+}));
+
+test('one failed report section preserves earlier sections and source findings', async () => fixture(async root => {
+  await fs.writeFile(path.join(root, 'app.js'), 'const rule = true;');
+  let calls = 0;
+  const ai = { analyzeSource: async () => {
+    calls++;
+    if (calls === 3) throw Object.assign(new Error('truncated'), { code: 'AI_OUTPUT_LIMIT', partialText: 'Partial rules' });
+    return 'Complete finding';
+  } };
+  const result = await new Stage1Understand({ repo: root, ai }).execute();
+  assert.equal(result.aiStatus, 'partial');
+  assert.equal(result.chunkNotes[0].complete, true);
+  assert.equal(result.reportSections.length, 4);
+  assert.equal(result.reportSections[0].complete, true);
+  assert.equal(result.reportSections[1].complete, false);
+  assert.ok(result.aiUnderstanding.includes('Partial rules'));
+}));
+
+test('test-script discovery produces review-only proposals and never executes lifecycle hooks', async () => fixture(async root => {
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node tests.js', pretest: 'node setup.js', start: 'node server.js' } }));
+  const result = await new Stage1Understand({ repo: root, readOnly: true }).execute();
+  assert.equal(result.testCommands.length, 1);
+  assert.deepEqual(result.testCommands[0].args, ['run', 'test']);
+  assert.equal(result.testCommands[0].before, 'node setup.js');
+  assert.equal(result.testCommands[0].requiresApproval, true);
+  assert.equal(result.execution.supported, false);
+  assert.equal(result.execution.status, 'not_run');
+}));

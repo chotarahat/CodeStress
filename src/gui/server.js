@@ -25,6 +25,7 @@ let currentRun = null;
 function broadcastLog(data) {
   if (currentRun) {
     if (data.type === 'stage_start') currentRun.started = data;
+    if (data.type === 'authentication_result') currentRun.auth = data;
     if (data.type === 'repository_read') currentRun.repository = data;
     if (['reading_progress', 'understanding_progress'].includes(data.type)) currentRun.progress = data;
     if (['stage_complete', 'stage_error'].includes(data.type)) currentRun.finished = data;
@@ -54,10 +55,11 @@ app.get('/api/stream', (req, res) => {
   res.write(`data: ${JSON.stringify({ type: 'connected', time: new Date().toISOString() })}\n\n`);
 
   if (currentRun?.active) {
-    for (const event of [currentRun.started, currentRun.repository, currentRun.progress]) {
+    for (const event of [currentRun.started, currentRun.auth, currentRun.repository, currentRun.progress]) {
       if (event) res.write(`data: ${JSON.stringify(event)}\n\n`);
     }
   } else if (currentRun?.finished) {
+    if (currentRun.auth) res.write(`data: ${JSON.stringify(currentRun.auth)}\n\n`);
     res.write(`data: ${JSON.stringify(currentRun.finished)}\n\n`);
   }
 
@@ -70,7 +72,7 @@ app.get('/api/stream', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'online',
-    capabilities: ['source-understanding'],
+    capabilities: ['source-understanding', 'evidence-based-auth', 'automatic-auth-discovery'],
     engine: `Ollama (${process.env.OLLAMA_MODEL || 'gpt-oss:120b'})`,
     model: process.env.OLLAMA_MODEL || 'gpt-oss:120b',
     running: Boolean(currentRun?.active),
@@ -81,7 +83,7 @@ app.get('/api/status', (req, res) => {
 
 // Run Stage 0 / Pipeline from GUI
 app.post('/api/run', async (req, res) => {
-  const { target, repo, authId, bearer, cookie, email, password } = req.body || {};
+  const { target, repo, authId, bearer, cookie, email, password, authLoginPath, authVerifyPath, authIdField } = req.body || {};
 
   if (currentRun?.active) return res.status(409).json({ error: 'An assessment is already running.' });
   if (!target) {
@@ -111,6 +113,10 @@ app.post('/api/run', async (req, res) => {
       target,
       repo: repo || process.cwd(),
       authId,
+      authLoginPath,
+      authVerifyPath,
+      authIdField,
+      onAuthResult: result => broadcastLog({ type: 'authentication_result', data: result }),
       bearer,
       cookie,
       email,
@@ -125,7 +131,12 @@ app.post('/api/run', async (req, res) => {
       stage: 0,
       data: {
         reachable: true,
-        authStatus: result.authResult?.status || (result.authResult?.valid ? 'SUCCESS' : 'FAILED'),
+        authStatus: result.authResult?.status || 'UNVERIFIED',
+        authVerified: result.authResult?.authenticated === true,
+        authDetail: result.authResult?.detail || '',
+        authEvidence: result.authResult?.evidence || [],
+        confirmed: result.confirmed,
+        sourceScanned: Boolean(result.codeAnalysis),
         authMode: result.authResult?.type || 'unauthenticated',
         authUser: result.authResult?.user || null,
         authError: result.authResult?.error || null,
@@ -140,8 +151,8 @@ app.post('/api/run', async (req, res) => {
 
     broadcastLog({
       type: 'log',
-      level: 'success',
-      text: '✓ Stage 0 completed successfully!'
+      level: result.confirmed ? 'success' : 'warn',
+      text: result.confirmed ? 'Stage 0 completed.' : 'Stage 0 stopped: authentication was not verified. See the authentication evidence.'
     });
   } catch (err) {
     broadcastLog({

@@ -1123,3 +1123,10 @@ input:focus,select:focus {
 #coverageText { font-size:14px; color:#b9c8bf; overflow-wrap:anywhere; }
 
 #statusLabel, #authLabel { font:inherit; display:inline; }
+#aiFindings, #testCommands { margin-top:24px; }
+#aiFindings .summary-text { padding:14px 0; font-size:14px; }
+#testCommands p { font-size:14px; color:var(--muted); }
+#testCommands pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
+.auth-evidence { padding:16px 20px; margin-bottom:20px; font-size:14px; overflow-wrap:anywhere; }
+.auth-evidence summary { cursor:pointer; font-weight:600; }
+.auth-evidence p, .auth-evidence li { color:#bdc8c1; }
